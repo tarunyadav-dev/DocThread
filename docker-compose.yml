@@ -1,0 +1,37 @@
+
+services:
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docthread-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app          # Hot-reloading for Python
+      - ./backend/data:/app/data # Persist the Chroma/SQLite databases
+    env_file:
+      - .env
+    networks:
+      - docthread-network
+
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: docthread-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app         # Hot-reloading for Next.js
+      - /app/node_modules       # Prevent overwriting container's node_modules
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    networks:
+      - docthread-network
+
+networks:
+  docthread-network:
+    driver: bridge
