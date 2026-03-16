@@ -15,4 +15,4 @@ AI is incredible at writing complex logic, but it leaves developers disconnected
 1. Clone the repository.
 2. Copy `.env.example` to `.env` and add your API keys.
 3. Run `docker compose up --build` (or `make dev`).
-4. Open `http://localhost:3000`.
+4. Open `http://localhost:3000`..
