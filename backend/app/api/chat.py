@@ -1,22 +1,23 @@
-# backend/app/api/chat.py
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pathlib import Path
-import traceback # 🔥 Added to pinpoint exact errors in Docker logs
+import traceback
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from fastapi.responses import StreamingResponse
+import litellm
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 router = APIRouter()
 
 # --- GLOBAL CACHE ---
-# Loading AI models takes seconds. We want to do it ONCE and keep it in memory.
 VECTOR_STORE_CACHE = {}
 EMBEDDINGS_MODEL = None
 
 def get_vector_store(framework: str):
     global EMBEDDINGS_MODEL
-    
-    # If we already loaded this database, return it instantly
     if framework in VECTOR_STORE_CACHE:
         return VECTOR_STORE_CACHE[framework]
 
@@ -26,76 +27,109 @@ def get_vector_store(framework: str):
     if not chroma_dir.exists():
         raise FileNotFoundError(f"Database for {framework} not found at {chroma_dir}")
 
-    # Load the math model only once
     if EMBEDDINGS_MODEL is None:
-        print("⏳ Loading HuggingFace Embeddings Model into memory...")
+        print("⏳ Loading HuggingFace Embeddings (all-MiniLM-L6-v2)...")
         EMBEDDINGS_MODEL = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-    print(f"🔌 Connecting to ChromaDB for {framework}...")
     vector_db = Chroma(
         persist_directory=str(chroma_dir),
         embedding_function=EMBEDDINGS_MODEL,
         collection_name=f"{framework}_docs"
     )
     
-    # Save to cache so the next search is lightning fast
     VECTOR_STORE_CACHE[framework] = vector_db
     return vector_db
-
 
 # --- SCHEMAS ---
 class SearchRequest(BaseModel):
     query: str
     framework_name: str
-    top_k: int = 3 # How many chunks to return
+    top_k: int = 3
 
 class ChatRequest(BaseModel):
     message: str
     framework_name: str
-
+    model: str = "google/gemini-2.0-flash-lite-preview-02-05:free"
 
 # --- ENDPOINTS ---
 @router.post("/chat/search")
 async def raw_documentation_search(request: SearchRequest):
-    """
-    THE SYNTAX MAPPER API:
-    Takes a query/code snippet, searches ChromaDB, and returns the exact 
-    documentation chunks with their metadata.
-    """
     framework = request.framework_name.lower()
-    
     try:
-        # Get the cached database
         vector_db = get_vector_store(framework)
-        
-        # Perform the search
         results = vector_db.similarity_search(request.query, k=request.top_k)
-        
-        # Format the output for Next.js
-        formatted_results = []
-        for doc in results:
-            formatted_results.append({
-                "content": doc.page_content,
-                "metadata": doc.metadata
-            })
-            
-        return {"query": request.query, "results": formatted_results}
-        
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        return {
+            "query": request.query, 
+            "results": [{"content": d.page_content, "metadata": d.metadata} for d in results]
+        }
     except Exception as e:
-        # 🔥 Print the exact error to the Docker logs so we aren't guessing!
-        print("\n❌ CRITICAL SEARCH ERROR:")
-        traceback.print_exc() 
-        print("-" * 50)
-        raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """
-    FUTURE LITE-LLM ROUTE
-    """
-    return {
-        "status": "placeholder",
-        "message": f"AI Chat route prepared. Ready to connect LiteLLM for '{request.framework_name}'."
-    }
+    framework = request.framework_name.lower()
+    # 🔥 HARDCODED KEY FOR RELIABILITY
+    MY_KEY = "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"
+    
+    try:
+        # 1. RAG Retrieval
+        vector_db = get_vector_store(framework)
+        docs = vector_db.similarity_search(request.message, k=4)
+        
+        context_text = "\n\n---\n\n".join([
+            f"SOURCE_FILE: {doc.metadata.get('source_file', 'Unknown')}\n{doc.page_content}" 
+            for doc in docs
+        ])
+        
+        # 2. Strict Prompting
+        # 3. Build the Dual-Structure System Prompt
+        system_prompt = f"""You are DocThread, a high-precision Documentation Analyzer.
+        
+Your response MUST follow this exact format:
+
+### 🧠 EXPERT ANALYSIS
+(Provide your detailed, intelligent explanation here using your full knowledge.)
+
+### 📑 DOCUMENTATION REFERENCE
+**Source File:** [Insert Filename from context here]
+**Relevant Snippet:** [Insert the most relevant 1-2 lines from the chunk here]
+
+---
+STRICT RULES:
+1. If the user asks something NOT in the docs, you must still provide the ANALYSIS but state "No local documentation match found" in the REFERENCE section.
+2. Always keep the REFERENCE section short and technical.
+
+LOCAL DOCUMENTATION CHUNKS:
+{context_text}
+"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": request.message}
+        ]
+
+        # 3. Model ID Formatting
+        model_name = request.model
+        if not model_name.startswith("openrouter/") and not model_name.startswith("ollama/"):
+            model_name = f"openrouter/{model_name}"
+
+        async def response_generator():
+            try:
+                response = await litellm.acompletion(
+                    model=model_name,
+                    messages=messages,
+                    stream=True,
+                    api_key=MY_KEY,
+                )
+                async for chunk in response:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield content
+            except Exception as e:
+                yield f"AI_ERROR: {str(e)}"
+
+        return StreamingResponse(response_generator(), media_type="text/event-stream")
+
+    except Exception as e:
+        print(f"CRITICAL: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

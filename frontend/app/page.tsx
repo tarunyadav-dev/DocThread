@@ -1,186 +1,216 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Bot, User, Database, Terminal, Search, Code, Info, Sparkles } from 'lucide-react';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  isStreaming?: boolean;
+  isSearching?: boolean;
+}
 
 const API_BASE = "http://localhost:8000/api";
 
-export default function ApiTesterPage() {
-  const [framework, setFramework] = useState("pandas");
-  const [query, setQuery] = useState("How do I create a DataFrame?");
-  const [chatMessage, setChatMessage] = useState("What does useEffect do?");
-  const [logs, setLogs] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+export default function PandasExpertChat() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // --- Helper to call the backend and log the result ---
-  const callApi = async (endpoint: string, payload: any) => {
-    setLoading(true);
-    const startTime = Date.now();
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage: Message = { role: 'user', content: input };
+    setMessages(prev => [...prev, userMessage]);
+    setInput("");
+    setIsLoading(true);
+
+    // Phase 1: Search Pulse
+    setMessages(prev => [...prev, { role: 'assistant', content: "", isSearching: true }]);
+
     try {
-      const response = await fetch(`${API_BASE}${endpoint}`, {
+      const response = await fetch(`${API_BASE}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          message: input,
+          framework_name: "pandas",
+          model: "openrouter/auto"
+        }),
       });
-      const data = await response.json();
-      const timeTaken = Date.now() - startTime;
-      
-      // Add to our on-screen terminal
-      setLogs((prev) => [
-        { endpoint, status: response.status, time: `${timeTaken}ms`, data },
-        ...prev,
-      ]);
-    } catch (error: any) {
-      setLogs((prev) => [
-        { endpoint, status: "ERROR", error: error.message },
-        ...prev,
-      ]);
+
+      if (!response.body) throw new Error("No response body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulatedContent = "";
+
+      // Phase 2: Switch to Stream
+      setMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1].isSearching = false;
+        next[next.length - 1].isStreaming = true;
+        return next;
+      });
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        accumulatedContent += chunk;
+
+        setMessages(prev => {
+          const newMessages = [...prev];
+          newMessages[newMessages.length - 1].content = accumulatedContent;
+          return newMessages;
+        });
+      }
+
+      setMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1].isStreaming = false;
+        return next;
+      });
+
+    } catch (error) {
+      setMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1].isSearching = false;
+        next[next.length - 1].content = "⚠️  ERROR: Check Backend Connection.";
+        return next;
+      });
+    } finally {
+      setIsLoading(false);
     }
-    setLoading(false);
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-300 p-8 font-mono">
-      <div className="max-w-6xl mx-auto space-y-8">
-        
-        <header className="border-b border-slate-800 pb-4">
-          <h1 className="text-3xl font-bold text-white tracking-tight">🚀 DocThread Mission Control</h1>
-          <p className="text-slate-500 mt-2">Testing all FastAPI endpoints from the Next.js Frontend</p>
-        </header>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          
-          {/* LEFT COLUMN: Controls */}
-          <div className="space-y-6">
-            
-            {/* 1. INGESTION ENGINE */}
-            <section className="bg-slate-900 p-6 rounded-xl border border-slate-800">
-              <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
-                ⚙️ 1. Ingestion Engine
-              </h2>
-              <div className="mb-4">
-                <label className="block text-sm text-slate-400 mb-1">Target Framework</label>
-                <input 
-                  type="text" 
-                  value={framework} 
-                  onChange={(e) => setFramework(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div className="flex flex-wrap gap-3">
-                <button 
-                  onClick={() => callApi("/ingest/scrape", { framework_name: framework })}
-                  className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm transition"
-                  disabled={loading}
-                >
-                  Trigger Scrape Only
-                </button>
-                <button 
-                  onClick={() => callApi("/ingest/vectorize", { framework_name: framework })}
-                  className="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded text-sm transition"
-                  disabled={loading}
-                >
-                  Trigger Vectorize Only
-                </button>
-                <button 
-                  onClick={() => callApi("/ingest/full", { framework_name: framework })}
-                  className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded text-sm transition font-bold"
-                  disabled={loading}
-                >
-                  Run Full Pipeline
-                </button>
-              </div>
-            </section>
-
-            {/* 2. SYNTAX MAPPER (SEARCH) */}
-            <section className="bg-slate-900 p-6 rounded-xl border border-slate-800">
-              <h2 className="text-xl font-semibold text-white mb-4">🔍 2. Vector Search (Syntax Mapper)</h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Search Query</label>
-                  <input 
-                    type="text" 
-                    value={query} 
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <button 
-                  onClick={() => callApi("/chat/search", { query: query, framework_name: framework, top_k: 3 })}
-                  className="w-full bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded text-sm transition"
-                  disabled={loading}
-                >
-                  Search ChromaDB Database
-                </button>
-              </div>
-            </section>
-
-            {/* 3. AI CHAT STREAM */}
-            <section className="bg-slate-900 p-6 rounded-xl border border-slate-800">
-              <h2 className="text-xl font-semibold text-white mb-4">💬 3. AI Chat Endpoint</h2>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Message</label>
-                  <input 
-                    type="text" 
-                    value={chatMessage} 
-                    onChange={(e) => setChatMessage(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-                <button 
-                  onClick={() => callApi("/chat/stream", { message: chatMessage, framework_name: framework })}
-                  className="w-full bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded text-sm transition"
-                  disabled={loading}
-                >
-                  Test Chat Connection
-                </button>
-              </div>
-            </section>
-
+    <div className="flex h-screen bg-[#0d1117] text-slate-300 font-mono overflow-hidden">
+      
+      {/* SIDEBAR */}
+      <aside className="w-72 bg-[#010409] border-r border-slate-800 p-6 flex flex-col hidden lg:flex">
+        <div className="flex items-center gap-3 mb-10">
+          <div className="bg-emerald-600 p-2 rounded-lg shadow-lg shadow-emerald-900/20">
+            <Database size={20} className="text-white" />
           </div>
+          <h1 className="text-lg font-bold text-white tracking-widest uppercase">Pandas_DB</h1>
+        </div>
 
-          {/* RIGHT COLUMN: The Output Terminal */}
-          <div className="bg-black p-6 rounded-xl border border-slate-800 flex flex-col h-[800px]">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-                🖥️ Response Terminal
-              </h2>
-              <button 
-                onClick={() => setLogs([])}
-                className="text-slate-500 hover:text-white text-sm underline"
-              >
-                Clear
-              </button>
+        <nav className="space-y-8 flex-1">
+          <div>
+            <p className="text-[10px] text-slate-500 font-black uppercase tracking-[0.3em] mb-4">Pipeline</p>
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between p-2 rounded bg-[#161b22] border border-slate-800">
+                <span className="text-slate-500">Mode</span>
+                <span className="text-emerald-500 font-bold">RAG_STRICT</span>
+              </div>
             </div>
-            
-            <div className="flex-1 overflow-y-auto bg-slate-950 p-4 rounded border border-slate-800 custom-scrollbar">
-              {logs.length === 0 ? (
-                <div className="text-slate-600 italic text-center mt-20">
-                  Awaiting commands... Fire an API request to see the JSON output.
-                </div>
-              ) : (
-                <div className="space-y-6">
-                  {logs.map((log, index) => (
-                    <div key={index} className="animate-fade-in-up">
-                      <div className="flex gap-3 text-xs mb-2 items-center">
-                        <span className={`px-2 py-1 rounded font-bold ${log.status === 200 ? 'bg-green-900 text-green-400' : 'bg-red-900 text-red-400'}`}>
-                          {log.status}
-                        </span>
-                        <span className="text-blue-400 font-semibold">{log.endpoint}</span>
-                        <span className="text-slate-500">{log.time}</span>
-                      </div>
-                      <pre className="bg-slate-900 p-3 rounded text-sm text-emerald-400 overflow-x-auto whitespace-pre-wrap">
-                        {JSON.stringify(log.data, null, 2)}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              )}
+          </div>
+        </nav>
+
+        <div className="mt-auto border-t border-slate-800 pt-6 text-[11px] text-slate-500">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+            <span>Status: Connected</span>
+          </div>
+        </div>
+      </aside>
+
+      {/* MAIN CHAT */}
+      <main className="flex-1 flex flex-col bg-[#0d1117]">
+        <div className="h-14 border-b border-slate-800 flex items-center px-8 bg-[#0d1117]/80 backdrop-blur-md">
+          <Terminal size={14} className="text-emerald-500 mr-3" />
+          <span className="text-xs font-bold text-slate-400 tracking-tighter">root@docthread:~/pandas_assistant</span>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-10 space-y-10 custom-scrollbar">
+          {messages.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center opacity-20">
+                <Search size={64} className="mb-4 text-slate-700" />
+                <p className="text-xl font-bold tracking-widest">AWAITING_INPUT...</p>
+            </div>
+          ) : (
+            messages.map((msg, idx) => (
+              
+<div className={`relative p-5 rounded-2xl border text-sm transition-all shadow-2xl
+  ${msg.role === 'user' 
+    ? 'bg-blue-600/5 border-blue-500/20 text-blue-50 rounded-tr-none' 
+    : 'bg-[#161b22] border-slate-800 text-slate-200 rounded-tl-none'
+  }`}>
+  
+  {msg.isSearching ? (
+    <div className="flex items-center gap-3 text-emerald-500 animate-pulse py-2">
+       <Search size={18} className="animate-spin-slow" />
+       <span className="font-bold tracking-tight">VECTOR_DB_RETRIEVAL_IN_PROGRESS...</span>
+    </div>
+  ) : (
+    /* --- PASTE THE NEW LOGIC HERE --- */
+    <div className={`prose prose-invert max-w-none font-sans text-[15px] leading-relaxed`}>
+      {msg.content.split('### 📑 DOCUMENTATION REFERENCE').map((part, i) => (
+        i === 0 ? (
+          <div key={i} className="mb-4 text-slate-300">
+            {part.replace('### 🧠 EXPERT ANALYSIS', '').trim()}
+          </div>
+        ) : (
+          <div key={i} className="mt-4 p-4 bg-black/40 border border-emerald-500/20 rounded-xl font-mono text-[12px] shadow-inner">
+            <div className="text-emerald-500 font-bold mb-3 flex items-center gap-2 border-b border-emerald-500/10 pb-2">
+              <Database size={14} /> 
+              <span className="tracking-widest">DOC_TRACE_LOG</span>
+            </div>
+            <div className="text-slate-400 overflow-x-auto">
+              {part.trim()}
+            </div>
+          </div>
+        )
+      ))}
+    </div>
+    /* --- END OF NEW LOGIC --- */
+  )}
+
+  {msg.isStreaming && <span className="inline-block w-2 h-4 ml-1 bg-emerald-500 animate-pulse align-middle" />}
+</div>
+            ))
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* INPUT DECK */}
+        <div className="p-8 bg-gradient-to-t from-[#0d1117] to-transparent">
+          <div className="max-w-4xl mx-auto">
+            <div className="relative flex items-center bg-[#010409] border border-slate-800 rounded-2xl p-2 pr-4 focus-within:border-emerald-500/50 transition-all shadow-2xl">
+              <div className="px-4 text-emerald-900 font-black text-xl select-none">{'>'}</div>
+              <input 
+                type="text"
+                placeholder="Message Pandas Documentation..."
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                className="flex-1 bg-transparent py-4 text-white focus:outline-none placeholder:text-slate-800 text-sm"
+              />
+              <button onClick={handleSend} disabled={isLoading} className="text-emerald-500 disabled:opacity-20 hover:text-emerald-400 transition-colors">
+                <Send size={20} />
+              </button>
             </div>
           </div>
         </div>
+      </main>
 
-      </div>
+      <style jsx global>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
+        .animate-spin-slow { animation: spin 4s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
     </div>
   );
 }
