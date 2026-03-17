@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 import litellm
 import os
 from dotenv import load_dotenv
+from app.core.config_manager import load_settings
 
 load_dotenv()
 router = APIRouter()
@@ -66,11 +67,22 @@ async def raw_documentation_search(request: SearchRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+# ... (Keep all your existing imports) ...
+from app.core.config_manager import load_settings # <--- ADD THIS IMPORT
+
+# ... (Keep get_vector_store and raw_documentation_search exactly the same) ...
+
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     framework = request.framework_name.lower()
-    # 🔥 HARDCODED KEY FOR RELIABILITY
-    MY_KEY = "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"
+    
+    # 🌟 LOAD SETTINGS DYNAMICALLY
+    settings = load_settings()
+    my_api_key = settings.get("api_key", "")
+    provider = settings.get("provider", "openrouter")
+    
+    # If the user passed a model from the UI, use it. Otherwise, use settings.
+    target_model = request.model if request.model else settings.get("model")
     
     try:
         # 1. RAG Retrieval
@@ -83,7 +95,6 @@ async def chat_stream(request: ChatRequest):
         ])
         
         # 2. Strict Prompting
-        # 3. Build the Dual-Structure System Prompt
         system_prompt = f"""You are DocThread, a high-precision Documentation Analyzer.
         
 Your response MUST follow this exact format:
@@ -108,10 +119,19 @@ LOCAL DOCUMENTATION CHUNKS:
             {"role": "user", "content": request.message}
         ]
 
-        # 3. Model ID Formatting
-        model_name = request.model
-        if not model_name.startswith("openrouter/") and not model_name.startswith("ollama/"):
-            model_name = f"openrouter/{model_name}"
+        # 3. Model ID & Provider Formatting (Handling Ollama vs OpenRouter)
+        # 3. Model ID & Provider Formatting (Handling Ollama vs OpenRouter vs Gemini)
+        api_base = None
+        if provider == "ollama":
+            model_name = f"ollama/{target_model}"
+            api_base = settings.get("ollama_base_url")
+        elif provider == "gemini":
+            # LiteLLM uses the 'gemini/' prefix for native Google AI Studio keys
+            model_name = f"gemini/{target_model}" if not target_model.startswith("gemini/") else target_model
+        elif provider == "openrouter":
+            model_name = f"openrouter/{target_model}" if not target_model.startswith("openrouter/") else target_model
+        else:
+            model_name = target_model # Fallback for OpenAI, Anthropic, etc.
 
         async def response_generator():
             try:
@@ -119,7 +139,8 @@ LOCAL DOCUMENTATION CHUNKS:
                     model=model_name,
                     messages=messages,
                     stream=True,
-                    api_key=MY_KEY,
+                    api_key=my_api_key,
+                    api_base=api_base # Required for Ollama
                 )
                 async for chunk in response:
                     content = chunk.choices[0].delta.content
